@@ -6,6 +6,7 @@ import (
 	"github.com/dropbox/dropbox-sdk-go-unofficial/dropbox/files"
 	"github.com/dustin/go-humanize"
 	"github.com/mitchellh/ioprogress"
+	"io"
 	"io/ioutil"
 	"log"
 	"os"
@@ -104,7 +105,41 @@ func getRecursiveFileEntries(startingDir string, fileNamesCollector []string) []
 	return fileNamesCollector
 }
 
-func fileUpload(c files.Client, fileName string, destFilePath string) {
+// this function pinched from https://github.com/dropbox/dbxcli/blob/master/cmd/put.go
+const chunkSize int64 = 1 << 24
+
+func uploadChunked(dbx files.Client, r io.Reader, commitInfo *files.CommitInfo, sizeTotal int64) (err error) {
+	fmt.Println("YO, ITS DAT CHUNKED UPLOADING!")
+	res, err := dbx.UploadSessionStart(files.NewUploadSessionStartArg(),
+		&io.LimitedReader{R: r, N: chunkSize})
+	if err != nil {
+		return
+	}
+
+	written := chunkSize
+
+	for (sizeTotal - written) > chunkSize {
+		cursor := files.NewUploadSessionCursor(res.SessionId, uint64(written))
+		args := files.NewUploadSessionAppendArg(cursor)
+
+		err = dbx.UploadSessionAppendV2(args, &io.LimitedReader{R: r, N: chunkSize})
+		if err != nil {
+			return
+		}
+		written += chunkSize
+	}
+
+	cursor := files.NewUploadSessionCursor(res.SessionId, uint64(written))
+	args := files.NewUploadSessionFinishArg(cursor, commitInfo)
+
+	if _, err = dbx.UploadSessionFinish(args, r); err != nil {
+		return
+	}
+
+	return
+}
+
+func fileUpload(c files.Client, fileName string, destFilePath string) (err error) {
 	fmt.Printf("UPLOADING \"%s\" TO \"%s\"\n", fileName, destFilePath)
 
 	contents, err := os.Open(fileName)
@@ -116,7 +151,7 @@ func fileUpload(c files.Client, fileName string, destFilePath string) {
 
 	contentsInfo, err := contents.Stat()
 	if err != nil {
-		return
+		return err
 	}
 
 	progressbar := &ioprogress.Reader{
@@ -134,15 +169,17 @@ func fileUpload(c files.Client, fileName string, destFilePath string) {
 	// The Dropbox API only accepts timestamps in UTC with second precision.
 	commitInfo.ClientModified = time.Now().UTC().Round(time.Second)
 
-	//if contentsInfo.Size() > chunkSize {
-	//	return uploadChunked(dbx, progressbar, commitInfo, contentsInfo.Size())
-	//}
+	if contentsInfo.Size() > chunkSize {
+		return uploadChunked(c, progressbar, commitInfo, contentsInfo.Size())
+	}
 
 	if _, err = c.Upload(commitInfo, progressbar); err != nil {
 		fmt.Println("OOFT ERROR! ", err)
-		return
+		return err
 	}
 	fmt.Println("DONE MOFO!\n")
+
+	return
 
 }
 
@@ -162,7 +199,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	fmt.Printf("Syncing %s\n", dirName)
+	dirName = strings.TrimSuffix(dirName, "/")
 
 	// TODO - flags -- daemon, verbose, dry-run
 
@@ -225,7 +262,11 @@ func main() {
 			}
 			if !fileFound {
 				fmt.Printf("FILE %s NOT FOUND - UPLOADINg!\n", destFilePath)
-				fileUpload(dbx, fullFilePathName, destFilePath)
+				err := fileUpload(dbx, fullFilePathName, destFilePath)
+				if err != nil {
+					fmt.Println("Errd uploading file:", err)
+				}
+
 			}
 		}
 
