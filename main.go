@@ -47,8 +47,6 @@ func getRemoteListing(c files.Client, path string) (entries []files.IsMetadata, 
 	arg := files.NewListFolderArg(path)
 	res, err := c.ListFolder(arg)
 	if err != nil {
-		xType := fmt.Sprintf("%T", err)
-		fmt.Println("ERROR TYOE IS: ", xType)
 		switch e := err.(type) {
 		case files.ListFolderAPIError:
 			if e.EndpointError.Path.Tag == files.LookupErrorNotFolder {
@@ -57,7 +55,7 @@ func getRemoteListing(c files.Client, path string) (entries []files.IsMetadata, 
 				entries = []files.IsMetadata{metaRes}
 			}
 		case dropbox.APIError:
-			fmt.Println("DISNAE EXIST!")
+			fmt.Println("API ERR!", e)
 		}
 
 	} else {
@@ -106,8 +104,8 @@ func getRecursiveFileEntries(startingDir string, fileNamesCollector []string) []
 	return fileNamesCollector
 }
 
-func fileUpload(c files.Client, fileName string, destDir string) {
-	fmt.Printf("UPLOADING \"%s\" TO \"%s\"\n", fileName, destDir)
+func fileUpload(c files.Client, fileName string, destFilePath string) {
+	fmt.Printf("UPLOADING \"%s\" TO \"%s\"\n", fileName, destFilePath)
 
 	contents, err := os.Open(fileName)
 	if err != nil {
@@ -130,7 +128,7 @@ func fileUpload(c files.Client, fileName string, destDir string) {
 		Size: contentsInfo.Size(),
 	}
 
-	commitInfo := files.NewCommitInfo(destDir)
+	commitInfo := files.NewCommitInfo(destFilePath)
 	commitInfo.Mode.Tag = "overwrite"
 
 	// The Dropbox API only accepts timestamps in UTC with second precision.
@@ -214,19 +212,20 @@ func main() {
 		remote_entries, path_exists := getRemoteListing(dbx, destFolder)
 		if path_exists {
 			fileFound := false
+			destFilePath := destFolder + "/" + fileName
 			for _, s := range remote_entries {
 
 				metadata, ok := s.(*files.FileMetadata)
 				if ok {
-					if metadata.PathDisplay == fileName {
+					if metadata.Name == fileName {
 						fileFound = true
-						fmt.Println("File ALready EXISTS!")
+						fmt.Printf("\"%s\" already exists - Skipping\n", destFilePath)
 					}
 				}
 			}
 			if !fileFound {
-				fmt.Printf("FILE %s NOT FOUND - UPLOADINg to %s!\n", fileName, destFolder)
-				fileUpload(dbx, fullFilePathName, destFolder)
+				fmt.Printf("FILE %s NOT FOUND - UPLOADINg!\n", destFilePath)
+				fileUpload(dbx, fullFilePathName, destFilePath)
 			}
 		}
 
