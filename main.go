@@ -4,11 +4,14 @@ import (
 	"fmt"
 	"github.com/dropbox/dropbox-sdk-go-unofficial/dropbox"
 	"github.com/dropbox/dropbox-sdk-go-unofficial/dropbox/files"
+	"github.com/dustin/go-humanize"
+	"github.com/mitchellh/ioprogress"
 	"io/ioutil"
 	"log"
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 )
 
 func FileExists(name string) bool {
@@ -84,6 +87,67 @@ func createRemoteDir(c files.Client, dir_name string) (bool, error) {
 	return true, nil
 }
 
+func getRecursiveFileEntries(startingDir string, fileNamesCollector []string) []string {
+
+	files, err := ioutil.ReadDir(startingDir)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	for _, file := range files {
+		if strings.HasPrefix(file.Name(), ".") {
+			// ignore
+		} else if file.IsDir() {
+			fileNamesCollector = getRecursiveFileEntries(startingDir+"/"+file.Name(), fileNamesCollector)
+		} else {
+			fileNamesCollector = append(fileNamesCollector, startingDir+"/"+file.Name())
+		}
+	}
+	return fileNamesCollector
+}
+
+func fileUpload(c files.Client, fileName string, destDir string) {
+	fmt.Printf("UPLOADING \"%s\" TO \"%s\"\n", fileName, destDir)
+
+	contents, err := os.Open(fileName)
+	if err != nil {
+		fmt.Println("OOFT! DUNNO WHERE YER FILE IS ", fileName)
+		return
+	}
+	defer contents.Close()
+
+	contentsInfo, err := contents.Stat()
+	if err != nil {
+		return
+	}
+
+	progressbar := &ioprogress.Reader{
+		Reader: contents,
+		DrawFunc: ioprogress.DrawTerminalf(os.Stderr, func(progress, total int64) string {
+			return fmt.Sprintf("Uploading %s/%s",
+				humanize.IBytes(uint64(progress)), humanize.IBytes(uint64(total)))
+		}),
+		Size: contentsInfo.Size(),
+	}
+
+	commitInfo := files.NewCommitInfo(destDir)
+	commitInfo.Mode.Tag = "overwrite"
+
+	// The Dropbox API only accepts timestamps in UTC with second precision.
+	commitInfo.ClientModified = time.Now().UTC().Round(time.Second)
+
+	//if contentsInfo.Size() > chunkSize {
+	//	return uploadChunked(dbx, progressbar, commitInfo, contentsInfo.Size())
+	//}
+
+	if _, err = c.Upload(commitInfo, progressbar); err != nil {
+		fmt.Println("OOFT ERROR! ", err)
+		return
+	}
+	fmt.Println("DONE MOFO!\n")
+
+}
+
 func main() {
 	fmt.Println("Syncb0ard!")
 
@@ -102,27 +166,70 @@ func main() {
 
 	fmt.Printf("Syncing %s\n", dirName)
 
+	// TODO - flags -- daemon, verbose, dry-run
+
 	key, err := ioutil.ReadFile("key.txt")
 	if err != nil {
 		log.Fatal(err)
 	}
 	token := strings.TrimSuffix(string(key), "\n")
 	config := dropbox.Config{
-		Token:    token,
-		LogLevel: dropbox.LogInfo,
+		Token: token,
+		//LogLevel: dropbox.LogInfo,
 	}
 
 	dbx := files.New(config)
 
-	remote_path := "/" + filepath.Base(dirName)
-	entries, path_exists := getRemoteListing(dbx, remote_path)
-	fmt.Printf("PATH EXIXTS? %s\n", path_exists)
-	if !path_exists {
-		createRemoteDir(dbx, remote_path)
-	}
+	filesToUpload := []string{}
+	filesToUpload = getRecursiveFileEntries(dirName, filesToUpload)
 
-	for i, s := range entries {
-		fmt.Println(i, s, "\n")
+	baseDirSlice := strings.Split(dirName, "/")
+	basePathFolderName := baseDirSlice[len(baseDirSlice)-1]
+	basePathDestination := "/" + basePathFolderName
+	fmt.Printf("BAse Path DEST is %s\n", basePathDestination)
+
+	for _, fullFilePathName := range filesToUpload {
+		fmt.Println()
+		fullDirName := filepath.Dir(fullFilePathName)
+
+		// If file is in subdirectory, let's build up that
+		// dirpath and create as needed
+		dirNameSlices := strings.Split(fullDirName, "/")
+		destFolder := basePathDestination
+		baseFound := false
+		for _, n := range dirNameSlices {
+			if n == basePathFolderName {
+				baseFound = true
+			} else if baseFound {
+				destFolder += "/" + n
+				_, path_exists := getRemoteListing(dbx, destFolder)
+				if !path_exists {
+					createRemoteDir(dbx, destFolder)
+				}
+			}
+		}
+
+		// destFolder now exists, upload file
+		fileName := filepath.Base(fullFilePathName)
+		remote_entries, path_exists := getRemoteListing(dbx, destFolder)
+		if path_exists {
+			fileFound := false
+			for _, s := range remote_entries {
+
+				metadata, ok := s.(*files.FileMetadata)
+				if ok {
+					if metadata.PathDisplay == fileName {
+						fileFound = true
+						fmt.Println("File ALready EXISTS!")
+					}
+				}
+			}
+			if !fileFound {
+				fmt.Printf("FILE %s NOT FOUND - UPLOADINg to %s!\n", fileName, destFolder)
+				fileUpload(dbx, fullFilePathName, destFolder)
+			}
+		}
+
 	}
 
 }
